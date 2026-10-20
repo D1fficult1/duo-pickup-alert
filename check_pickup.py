@@ -1,80 +1,65 @@
 import os
-import re
 import json
 import urllib.request
 import urllib.parse
-import html
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-URL = (
-    "https://www.apple.com/ae/shop/buy-iphone/"
-    "iphone-duo/7.6-inch-display-256gb-night-sky"
-)
+PARTS = [
+    "MK244AH/A", "MK254AH/A",
+    "MK264AH/A", "MK274AH/A",
+    "MK284AH/A", "MK294AH/A",
+    "MK2A4AH/A", "MK2C4AH/A",
+]
 
 def send_telegram(message):
-    api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = urllib.parse.urlencode({
         "chat_id": CHAT_ID,
         "text": message[:4000]
     }).encode()
-    req = urllib.request.Request(api_url, data=data)
-    with urllib.request.urlopen(req, timeout=20) as response:
-        response.read()
+    req = urllib.request.Request(url, data=data)
+    with urllib.request.urlopen(req, timeout=20) as r:
+        r.read()
 
 def main():
+    params = [("pl", "true"), ("location", "Dubai")]
+    params += [(f"parts.{i}", p) for i, p in enumerate(PARTS)]
+    url = (
+        "https://www.apple.com/ae/shop/retail/pickup-message?"
+        + urllib.parse.urlencode(params)
+    )
     req = urllib.request.Request(
-        URL,
-        headers={"User-Agent": "Mozilla/5.0"}
+        url, headers={"User-Agent": "Mozilla/5.0"}
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            status = response.status
-            page = response.read().decode("utf-8", errors="replace")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            status = r.status
+            body = r.read().decode("utf-8", errors="replace")
 
-        title_match = re.search(
-            r"<title[^>]*>(.*?)</title>",
-            page, re.IGNORECASE | re.DOTALL
-        )
-        title = html.unescape(title_match.group(1)).strip() if title_match else "Не найден"
-
-        # Собираем возможные артикулы из HTML.
-        candidates = sorted(set(re.findall(
-            r"\b[A-Z0-9]{5,10}AH/A\b", page
-        )))
-
-        message = (
-            "🔎 Диагностика Apple Duo\n"
-            f"HTTP: {status}\n"
-            f"Заголовок страницы: {title}\n"
-            f"Размер страницы: {len(page)} символов\n"
-            f"Найдено возможных артикулов: {len(candidates)}\n"
-        )
-
-        if candidates:
-            message += "\n".join(candidates[:40])
-            message += (
-                "\n\n⚠️ Это кандидаты из HTML, "
-                "а не подтверждённые артикулы Duo."
+        try:
+            data = json.loads(body)
+            result = json.dumps(data, ensure_ascii=False, indent=2)
+            message = (
+                f"Apple Pickup API — HTTP {status}\n"
+                + result[:3500]
+                + "\n\nДиагностика: наличие ещё не подтверждено."
             )
-        else:
-            message += (
-                "\nАртикулы в ожидаемом формате не найдены. "
-                "Возможно, страница загружается динамически."
+        except json.JSONDecodeError:
+            message = (
+                f"Apple Pickup API — HTTP {status}\n"
+                "Ответ не в формате JSON:\n" + body[:2500]
             )
 
         send_telegram(message)
 
-    except Exception as error:
-        try:
-            send_telegram(
-                "❌ Ошибка проверки Apple Duo:\n"
-                f"{type(error).__name__}: {error}"
-            )
-        finally:
-            raise
+    except Exception as e:
+        send_telegram(
+            f"Ошибка Apple Pickup API: {type(e).__name__}: {e}"
+        )
+        raise
 
 if __name__ == "__main__":
     main()
