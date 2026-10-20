@@ -1,22 +1,16 @@
 import os
 import json
-import re
 import urllib.request
 import urllib.parse
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-BASE = "https://www.apple.com/ae/shop/buy-iphone/iphone-duo/"
-VARIANTS = [
-    "7.6-inch-display-256gb-night-sky",
-    "7.6-inch-display-256gb-star-white",
-    "7.6-inch-display-512gb-night-sky",
-    "7.6-inch-display-512gb-star-white",
-    "7.6-inch-display-1tb-night-sky",
-    "7.6-inch-display-1tb-star-white",
-    "7.6-inch-display-2tb-night-sky",
-    "7.6-inch-display-2tb-star-white",
+PARTS = [
+    "MK244AH/A", "MK254AH/A",
+    "MK264AH/A", "MK274AH/A",
+    "MK284AH/A", "MK294AH/A",
+    "MK2A4AH/A", "MK2C4AH/A",
 ]
 
 def send_telegram(message):
@@ -30,39 +24,45 @@ def send_telegram(message):
         r.read()
 
 def main():
-    report = ["Диагностика Apple UAE — поиск артикулов"]
-    for variant in VARIANTS:
-        url = BASE + variant
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "Mozilla/5.0"}
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=20) as r:
-                html = r.read().decode("utf-8", errors="replace")
-                status = r.status
+    params = [
+        ("pl", "true"),
+        ("location", "Dubai"),
+    ]
+    params += [(f"parts.{i}", p) for i, p in enumerate(PARTS)]
 
-            # Ищем возможные поля артикула в HTML страницы.
-            found = set()
-            for pattern in (
-                r'"partNumber"\s*:\s*"([^"]+)"',
-                r'"productPartNumber"\s*:\s*"([^"]+)"',
-                r'"sku"\s*:\s*"([^"]+)"',
-            ):
-                found.update(re.findall(pattern, html, re.I))
-
-            report.append(
-                f"\n{variant}\nHTTP {status}; "
-                f"возможные артикулы: "
-                f"{', '.join(sorted(found)[:8]) or 'не найдены'}"
-            )
-        except Exception as e:
-            report.append(f"\n{variant}\nОшибка: {type(e).__name__}")
-
-    report.append(
-        "\nЭто диагностика, не проверка наличия. "
-        "Пока артикулы не подтверждены."
+    url = (
+        "https://www.apple.com/ae/shop/retail/pickup-message?"
+        + urllib.parse.urlencode(params)
     )
-    send_telegram("\n".join(report))
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0"}
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            status = r.status
+            body = r.read().decode("utf-8", errors="replace")
+
+        try:
+            data = json.loads(body)
+            result = json.dumps(
+                data, ensure_ascii=False, indent=2
+            )
+            send_telegram(
+                f"Apple Pickup API: HTTP {status}\n"
+                + result[:3500]
+                + "\n\nДиагностика; наличие пока не подтверждено."
+            )
+        except json.JSONDecodeError:
+            send_telegram(
+                f"Apple вернула HTTP {status}, но ответ не JSON.\n"
+                + body[:2500]
+            )
+    except Exception as e:
+        send_telegram(
+            f"Ошибка запроса Apple Pickup API: {type(e).__name__}: {e}"
+        )
 
 if __name__ == "__main__":
     main()
