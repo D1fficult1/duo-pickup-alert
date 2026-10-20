@@ -1,58 +1,68 @@
 import os
 import json
+import re
 import urllib.request
-import urllib.error
+import urllib.parse
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-APPLE_URL = "https://www.apple.com/ae/shop/buy-iphone/iphone-duo"
+BASE = "https://www.apple.com/ae/shop/buy-iphone/iphone-duo/"
+VARIANTS = [
+    "7.6-inch-display-256gb-night-sky",
+    "7.6-inch-display-256gb-star-white",
+    "7.6-inch-display-512gb-night-sky",
+    "7.6-inch-display-512gb-star-white",
+    "7.6-inch-display-1tb-night-sky",
+    "7.6-inch-display-1tb-star-white",
+    "7.6-inch-display-2tb-night-sky",
+    "7.6-inch-display-2tb-star-white",
+]
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = json.dumps({
+    data = urllib.parse.urlencode({
         "chat_id": CHAT_ID,
-        "text": message
-    }).encode("utf-8")
-
-    request = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"}
-    )
-
-    with urllib.request.urlopen(request, timeout=20) as response:
-        response.read()
+        "text": message[:4000]
+    }).encode()
+    req = urllib.request.Request(url, data=data)
+    with urllib.request.urlopen(req, timeout=20) as r:
+        r.read()
 
 def main():
-    request = urllib.request.Request(
-        APPLE_URL,
-        headers={"User-Agent": "Mozilla/5.0"}
+    report = ["Диагностика Apple UAE — поиск артикулов"]
+    for variant in VARIANTS:
+        url = BASE + variant
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                html = r.read().decode("utf-8", errors="replace")
+                status = r.status
+
+            # Ищем возможные поля артикула в HTML страницы.
+            found = set()
+            for pattern in (
+                r'"partNumber"\s*:\s*"([^"]+)"',
+                r'"productPartNumber"\s*:\s*"([^"]+)"',
+                r'"sku"\s*:\s*"([^"]+)"',
+            ):
+                found.update(re.findall(pattern, html, re.I))
+
+            report.append(
+                f"\n{variant}\nHTTP {status}; "
+                f"возможные артикулы: "
+                f"{', '.join(sorted(found)[:8]) or 'не найдены'}"
+            )
+        except Exception as e:
+            report.append(f"\n{variant}\nОшибка: {type(e).__name__}")
+
+    report.append(
+        "\nЭто диагностика, не проверка наличия. "
+        "Пока артикулы не подтверждены."
     )
-
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            status = response.status
-
-        send_telegram(
-            "Монитор iPhone Duo запущен.\n"
-            f"Страница Apple UAE ответила с HTTP {status}.\n"
-            "Это проверка доступности страницы, а не наличия товара. "
-            "Проверка самовывоза ещё настраивается."
-        )
-
-    except urllib.error.HTTPError as error:
-        send_telegram(
-            "Монитор iPhone Duo: Apple вернула HTTP "
-            f"{error.code}. Наличие товара не подтверждено."
-        )
-
-    except Exception as error:
-        send_telegram(
-            "Монитор iPhone Duo: не удалось проверить Apple. "
-            f"Тип ошибки: {type(error).__name__}. "
-            "Наличие товара не подтверждено."
-        )
+    send_telegram("\n".join(report))
 
 if __name__ == "__main__":
     main()
