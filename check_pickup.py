@@ -59,7 +59,10 @@ def telegram(message, chat_id=None):
         "text": message[:4000],
     }).encode()
 
-    api_json(url, data)
+    try:
+        api_json(url, data)
+    except Exception as e:
+        print(f"Failed to send Telegram message: {e}")
 
 
 def load_state():
@@ -98,83 +101,120 @@ def save_offset(offset):
 
 
 def persist_files():
-    subprocess.run(
-        ["git", "config", "user.name", "Duo Pickup Bot"],
-        check=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.email", "actions@github.com"],
-        check=True,
-    )
-
-    subprocess.run(
-        ["git", "add", STATE_FILE, OFFSET_FILE],
-        check=True,
-    )
-
-    changed = (
+    """Сохраняет состояние в GitHub с учётом новых удалённых коммитов."""
+    try:
         subprocess.run(
-            ["git", "diff", "--cached", "--quiet"]
-        ).returncode != 0
-    )
-
-    if changed:
-        subprocess.run(
-            ["git", "commit", "-m", "Update pickup monitor state"],
+            ["git", "config", "user.name", "Duo Pickup Bot"],
             check=True,
         )
-        subprocess.run(["git", "push"], check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "actions@github.com"],
+            check=True,
+        )
+
+        subprocess.run(
+            ["git", "add", STATE_FILE, OFFSET_FILE],
+            check=True,
+        )
+
+        changed = (
+            subprocess.run(
+                ["git", "diff", "--cached", "--quiet"]
+            ).returncode != 0
+        )
+
+        if not changed:
+            print("No state changes to commit.")
+            return
+
+        subprocess.run(
+            [
+                "git",
+                "commit",
+                "-m",
+                "Update pickup monitor state [skip ci]",
+            ],
+            check=True,
+        )
+
+        # Подтягиваем актуальную ветку после локального коммита.
+        # Локальный коммит переносится поверх свежих удалённых изменений.
+        subprocess.run(
+            ["git", "pull", "--rebase", "origin", "main"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        subprocess.run(
+            ["git", "push", "origin", "HEAD:main"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        print("Git state saved successfully.")
+
+    except subprocess.CalledProcessError as e:
+        print(f"Git persist failed: {e}")
+
+        if e.stdout:
+            print(f"stdout: {e.stdout}")
+
+        if e.stderr:
+            print(f"stderr: {e.stderr}")
+
+        raise
 
 
 def get_manual_requests(offset):
-    params = {
-        "timeout": 0,
-        "allowed_updates": json.dumps(["message"]),
-    }
+    try:
+        params = {
+            "timeout": 0,
+            "allowed_updates": json.dumps(["message"]),
+        }
 
-    if offset > 0:
-        params["offset"] = offset + 1
+        if offset > 0:
+            params["offset"] = offset + 1
 
-    url = (
-        f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?"
-        + urllib.parse.urlencode(params)
-    )
-
-    result = api_json(url)
-    updates = result.get("result", [])
-
-    manual_chats = set()
-    latest_offset = offset
-
-    print(f"Telegram updates received: {len(updates)}")
-
-    for update in updates:
-        update_id = update.get("update_id", 0)
-        latest_offset = max(latest_offset, update_id)
-
-        message = update.get("message", {})
-        chat = message.get("chat", {})
-        chat_id = chat.get("id")
-        chat_type = chat.get("type", "")
-        text = str(message.get("text", "")).strip()
-
-        command = (
-            text.split()[0].split("@")[0].lower()
-            if text else ""
+        url = (
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?"
+            + urllib.parse.urlencode(params)
         )
 
-        print(
-            f"Update {update_id}: "
-            f"type={chat_type}, command={command or 'none'}"
-        )
+        result = api_json(url)
+        updates = result.get("result", [])
 
-        if chat_type == "private" and command == "/start":
-            if chat_id is not None:
-                manual_chats.add(str(chat_id))
+        manual_chats = set()
+        latest_offset = offset
 
-    print(f"Manual /start requests: {len(manual_chats)}")
+        for update in updates:
+            update_id = update.get("update_id", 0)
+            latest_offset = max(latest_offset, update_id)
 
-    return manual_chats, latest_offset
+            message = update.get("message", {})
+            chat = message.get("chat", {})
+            chat_id = chat.get("id")
+            chat_type = chat.get("type", "")
+            text = str(message.get("text", "")).strip()
+
+            command = (
+                text.split()[0].split("@")[0].lower()
+                if text else ""
+            )
+
+            if chat_type == "private" and command == "/start":
+                if chat_id is not None:
+                    manual_chats.add(str(chat_id))
+
+        print(f"Telegram updates received: {len(updates)}")
+        print(f"Manual /start requests: {len(manual_chats)}")
+
+        return manual_chats, latest_offset
+
+    except Exception as e:
+        print(f"Error fetching telegram updates: {e}")
+        return set(), offset
 
 
 def check_pickup():
@@ -204,15 +244,13 @@ def check_pickup():
             stores = data.get("body", {}).get("stores", [])
 
             if not stores:
-                errors.append(
-                    f"{location}: Apple API returned no stores"
-                )
                 continue
 
             for store in stores:
                 store_name = store.get("storeName", "Apple Store")
                 city = store.get("city", location)
                 store_number = store.get("storeNumber", store_name)
+
                 stores_found.add(str(store_number))
 
                 availability = store.get("partsAvailability", {})
@@ -226,7 +264,9 @@ def check_pickup():
                         info.get("pickupSearchQuote", "")
                     ).strip().lower()
 
-                    eligible = info.get("storePickEligible") is True
+                    eligible = (
+                        info.get("storePickEligible") is True
+                    )
 
                     is_available = (
                         eligible
@@ -254,20 +294,18 @@ def check_pickup():
                     )
 
         except Exception as error:
-            errors.append(
-                f"{location}: {type(error).__name__}: {error}"
-            )
+            errors.append(f"{location}: {error}")
 
     if not stores_found:
         raise RuntimeError(
-            "Apple API did not return any stores. "
-            + "; ".join(errors[:3])
+            "Apple API did not return any stores."
         )
 
+    # Не сохраняем потенциально неполные результаты,
+    # если Apple API завершился ошибкой для какого-либо города.
     if errors:
         raise RuntimeError(
-            "Some location checks failed; state was not updated. "
-            + "; ".join(errors[:4])
+            "Apple API errors: " + "; ".join(errors)
         )
 
     return available_now, product_names, len(stores_found)
@@ -281,7 +319,9 @@ def availability_message(available_now, product_names):
         ]
 
         for key in sorted(available_now):
-            lines.append("• " + product_names.get(key, key))
+            lines.append(
+                "• " + product_names.get(key, key)
+            )
 
         lines.extend([
             "",
@@ -308,11 +348,9 @@ def main():
 
     manual_chats, latest_offset = get_manual_requests(old_offset)
 
-    # Сразу сохраняем обработанные обновления Telegram.
     save_offset(latest_offset)
     persist_files()
 
-    # Сразу подтверждаем получение команды /start.
     for chat_id in sorted(manual_chats):
         telegram(
             "⏳ Команда получена. Проверяю наличие Apple Duo...",
@@ -321,18 +359,9 @@ def main():
 
     try:
         available_now, product_names, store_count = check_pickup()
-
     except Exception as error:
-        # Если Apple API не сработал, сообщаем об этом
-        # в тот же личный чат, откуда пришёл /start.
-        for chat_id in sorted(manual_chats):
-            telegram(
-                "❌ Не удалось проверить наличие Apple Duo.\n"
-                f"Причина: {type(error).__name__}: {error}",
-                chat_id=chat_id,
-            )
-
-        raise
+        print(f"Skipping check due to API error: {error}")
+        return
 
     newly_available = available_now - old_state
 
@@ -343,7 +372,9 @@ def main():
         ]
 
         for key in sorted(newly_available):
-            lines.append("• " + product_names.get(key, key))
+            lines.append(
+                "• " + product_names.get(key, key)
+            )
 
         lines.extend([
             "",
@@ -353,14 +384,12 @@ def main():
 
         telegram("\n".join(lines))
 
-    # Отправляем полный результат проверки в ответ на /start.
     for chat_id in sorted(manual_chats):
         telegram(
             availability_message(available_now, product_names),
             chat_id=chat_id,
         )
 
-    # Сообщение о ручном запуске из GitHub Actions.
     if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
         telegram(
             "✅ Проверка Duo Pickup Bot завершена.\n"
@@ -375,20 +404,13 @@ def main():
     print(f"Stores found: {store_count}")
     print(f"Available variants: {len(available_now)}")
     print(f"Newly available variants: {len(newly_available)}")
-    print(f"Saved Telegram offset: {latest_offset}")
 
 
 if __name__ == "__main__":
     try:
         main()
-
     except Exception as error:
-        print(f"ERROR: {type(error).__name__}: {error}")
-
-        try:
-            telegram(
-                "❌ Ошибка Duo Pickup Bot:\n"
-                f"{type(error).__name__}: {error}"
-            )
-        finally:
-            raise
+        print(
+            f"CRITICAL ERROR: {type(error).__name__}: {error}"
+        )
+        raise
