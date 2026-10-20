@@ -23,8 +23,16 @@ jobs:
         with:
           persist-credentials: true
 
-      # Оставь здесь существующие шаги настройки Python
-      # и установки зависимостей без изменений.
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
 
       - name: Run pickup monitor
         env:
