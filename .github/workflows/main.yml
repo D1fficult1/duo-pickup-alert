@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download repository
-        uses: uses: actions/checkout@v5
+        uses: actions/checkout@v5
 
       - name: Run Python monitor
         env:
