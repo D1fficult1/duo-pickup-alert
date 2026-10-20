@@ -3,7 +3,7 @@ name: Duo pickup monitor
 on:
   workflow_dispatch:
   schedule:
-    - cron: "2/5 * * * *"
+    - cron: "*/5 * * * *"
 
 permissions:
   contents: write
@@ -15,10 +15,10 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 5
 
     steps:
-      - name: Download repository
+      - name: Checkout repository
         uses: actions/checkout@v5
         with:
           persist-credentials: true
@@ -33,4 +33,4 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
-        run: python check_pickup.py
+        run: python -u check_pickup.py
