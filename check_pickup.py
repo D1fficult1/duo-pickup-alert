@@ -132,8 +132,6 @@ def get_manual_requests(offset):
         "allowed_updates": json.dumps(["message"]),
     }
 
-    # Если offset ещё не сохранён, получаем самые ранние
-    # неподтверждённые обновления Telegram.
     if offset > 0:
         params["offset"] = offset + 1
 
@@ -160,14 +158,16 @@ def get_manual_requests(offset):
         chat_type = chat.get("type", "")
         text = str(message.get("text", "")).strip()
 
-        command = text.split()[0].split("@")[0].lower() if text else ""
+        command = (
+            text.split()[0].split("@")[0].lower()
+            if text else ""
+        )
 
         print(
             f"Update {update_id}: "
             f"type={chat_type}, command={command or 'none'}"
         )
 
-        # Принимаем /start только в личном чате.
         if chat_type == "private" and command == "/start":
             if chat_id is not None:
                 manual_chats.add(str(chat_id))
@@ -308,7 +308,32 @@ def main():
 
     manual_chats, latest_offset = get_manual_requests(old_offset)
 
-    available_now, product_names, store_count = check_pickup()
+    # Сразу сохраняем обработанные обновления Telegram.
+    save_offset(latest_offset)
+    persist_files()
+
+    # Сразу подтверждаем получение команды /start.
+    for chat_id in sorted(manual_chats):
+        telegram(
+            "⏳ Команда получена. Проверяю наличие Apple Duo...",
+            chat_id=chat_id,
+        )
+
+    try:
+        available_now, product_names, store_count = check_pickup()
+
+    except Exception as error:
+        # Если Apple API не сработал, сообщаем об этом
+        # в тот же личный чат, откуда пришёл /start.
+        for chat_id in sorted(manual_chats):
+            telegram(
+                "❌ Не удалось проверить наличие Apple Duo.\n"
+                f"Причина: {type(error).__name__}: {error}",
+                chat_id=chat_id,
+            )
+
+        raise
+
     newly_available = available_now - old_state
 
     if newly_available:
@@ -328,14 +353,14 @@ def main():
 
         telegram("\n".join(lines))
 
-    # Ответ на /start отправляется в тот личный чат,
-    # откуда пришла команда.
+    # Отправляем полный результат проверки в ответ на /start.
     for chat_id in sorted(manual_chats):
         telegram(
             availability_message(available_now, product_names),
             chat_id=chat_id,
         )
 
+    # Сообщение о ручном запуске из GitHub Actions.
     if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
         telegram(
             "✅ Проверка Duo Pickup Bot завершена.\n"
@@ -356,6 +381,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+
     except Exception as error:
         print(f"ERROR: {type(error).__name__}: {error}")
 
