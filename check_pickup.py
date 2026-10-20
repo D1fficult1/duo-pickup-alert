@@ -50,10 +50,12 @@ def api_json(url, data=None):
     return result
 
 
-def telegram(message):
+def telegram(message, chat_id=None):
+    target_chat = CHAT_ID if chat_id is None else str(chat_id)
+
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = urllib.parse.urlencode({
-        "chat_id": CHAT_ID,
+        "chat_id": target_chat,
         "text": message[:4000],
     }).encode()
 
@@ -65,8 +67,6 @@ def load_state():
         with open(STATE_FILE, encoding="utf-8") as file:
             data = json.load(file)
 
-        # Совместимость со старым файлом,
-        # в котором хранился обычный список вариантов.
         if isinstance(data, list):
             return set(data)
 
@@ -113,8 +113,9 @@ def persist_files():
     )
 
     changed = (
-        subprocess.run(["git", "diff", "--cached", "--quiet"]).returncode
-        != 0
+        subprocess.run(
+            ["git", "diff", "--cached", "--quiet"]
+        ).returncode != 0
     )
 
     if changed:
@@ -126,37 +127,54 @@ def persist_files():
 
 
 def get_manual_requests(offset):
+    params = {
+        "timeout": 0,
+        "allowed_updates": json.dumps(["message"]),
+    }
+
+    # Если offset ещё не сохранён, получаем самые ранние
+    # неподтверждённые обновления Telegram.
+    if offset > 0:
+        params["offset"] = offset + 1
+
     url = (
         f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?"
-        + urllib.parse.urlencode({
-            "offset": offset + 1,
-            "timeout": 0,
-            "allowed_updates": json.dumps(["message"]),
-        })
+        + urllib.parse.urlencode(params)
     )
 
     result = api_json(url)
     updates = result.get("result", [])
 
-    manual_requested = False
+    manual_chats = set()
     latest_offset = offset
 
+    print(f"Telegram updates received: {len(updates)}")
+
     for update in updates:
-        latest_offset = max(latest_offset, update.get("update_id", 0))
+        update_id = update.get("update_id", 0)
+        latest_offset = max(latest_offset, update_id)
 
         message = update.get("message", {})
         chat = message.get("chat", {})
+        chat_id = chat.get("id")
+        chat_type = chat.get("type", "")
         text = str(message.get("text", "")).strip()
 
-        if str(chat.get("id", "")) != str(CHAT_ID):
-            continue
+        command = text.split()[0].split("@")[0].lower() if text else ""
 
-        command = text.split()[0].split("@")[0] if text else ""
+        print(
+            f"Update {update_id}: "
+            f"type={chat_type}, command={command or 'none'}"
+        )
 
-        if command == "/start":
-            manual_requested = True
+        # Принимаем /start только в личном чате.
+        if chat_type == "private" and command == "/start":
+            if chat_id is not None:
+                manual_chats.add(str(chat_id))
 
-    return manual_requested, latest_offset
+    print(f"Manual /start requests: {len(manual_chats)}")
+
+    return manual_chats, latest_offset
 
 
 def check_pickup():
@@ -186,7 +204,9 @@ def check_pickup():
             stores = data.get("body", {}).get("stores", [])
 
             if not stores:
-                errors.append(f"{location}: Apple API returned no stores")
+                errors.append(
+                    f"{location}: Apple API returned no stores"
+                )
                 continue
 
             for store in stores:
@@ -244,8 +264,6 @@ def check_pickup():
             + "; ".join(errors[:3])
         )
 
-    # Не сравниваем и не сохраняем неполный результат:
-    # временная ошибка API не должна сбросить историю наличия.
     if errors:
         raise RuntimeError(
             "Some location checks failed; state was not updated. "
@@ -255,21 +273,49 @@ def check_pickup():
     return available_now, product_names, len(stores_found)
 
 
+def availability_message(available_now, product_names):
+    if available_now:
+        lines = [
+            "🔎 Результат проверки Apple Duo:",
+            "",
+        ]
+
+        for key in sorted(available_now):
+            lines.append("• " + product_names.get(key, key))
+
+        lines.extend([
+            "",
+            "Проверь наличие на Apple UAE:",
+            "https://www.apple.com/ae/shop/buy-iphone/iphone-duo",
+        ])
+
+    else:
+        lines = [
+            "🔎 Проверка Apple Duo завершена.",
+            "Сейчас доступных вариантов самовывоза "
+            "среди проверенных конфигураций не найдено.",
+            "",
+            "Apple UAE:",
+            "https://www.apple.com/ae/shop/buy-iphone/iphone-duo",
+        ]
+
+    return "\n".join(lines)
+
+
 def main():
     old_state = load_state()
     old_offset = load_offset()
 
-    manual_requested, latest_offset = get_manual_requests(old_offset)
+    manual_chats, latest_offset = get_manual_requests(old_offset)
 
     available_now, product_names, store_count = check_pickup()
-
     newly_available = available_now - old_state
 
     if newly_available:
         lines = [
             "🎉 Apple Duo: появился самовывоз!",
             "",
-    ]
+        ]
 
         for key in sorted(newly_available):
             lines.append("• " + product_names.get(key, key))
@@ -282,34 +328,15 @@ def main():
 
         telegram("\n".join(lines))
 
-    if manual_requested:
-        if available_now:
-            lines = [
-                "🔎 Результат ручной проверки Apple Duo:",
-                "",
-            ]
+    # Ответ на /start отправляется в тот личный чат,
+    # откуда пришла команда.
+    for chat_id in sorted(manual_chats):
+        telegram(
+            availability_message(available_now, product_names),
+            chat_id=chat_id,
+        )
 
-            for key in sorted(available_now):
-                lines.append("• " + product_names.get(key, key))
-
-            lines.extend([
-                "",
-                "Ссылка на Apple UAE:",
-                "https://www.apple.com/ae/shop/buy-iphone/iphone-duo",
-            ])
-        else:
-            lines = [
-                "🔎 Проверка завершена.",
-                "Сейчас доступных вариантов для самовывоза "
-                "среди проверенных конфигураций не найдено.",
-                "",
-                "Apple UAE:",
-                "https://www.apple.com/ae/shop/buy-iphone/iphone-duo",
-            ]
-
-        telegram("\n".join(lines))
-
-    elif os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+    if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
         telegram(
             "✅ Проверка Duo Pickup Bot завершена.\n"
             f"Магазинов в результатах Apple API: {store_count}.\n"
@@ -323,12 +350,15 @@ def main():
     print(f"Stores found: {store_count}")
     print(f"Available variants: {len(available_now)}")
     print(f"Newly available variants: {len(newly_available)}")
+    print(f"Saved Telegram offset: {latest_offset}")
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as error:
+        print(f"ERROR: {type(error).__name__}: {error}")
+
         try:
             telegram(
                 "❌ Ошибка Duo Pickup Bot:\n"
