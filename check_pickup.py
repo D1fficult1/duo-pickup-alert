@@ -101,7 +101,7 @@ def save_offset(offset):
 
 
 def persist_files():
-    """Сохраняет состояние в GitHub с учётом новых удалённых коммитов."""
+    """Сохраняет состояние в GitHub."""
     try:
         subprocess.run(
             ["git", "config", "user.name", "Duo Pickup Bot"],
@@ -137,8 +137,6 @@ def persist_files():
             check=True,
         )
 
-        # Подтягиваем актуальную ветку после локального коммита.
-        # Локальный коммит переносится поверх свежих удалённых изменений.
         subprocess.run(
             ["git", "pull", "--rebase", "origin", "main"],
             check=True,
@@ -264,9 +262,7 @@ def check_pickup():
                         info.get("pickupSearchQuote", "")
                     ).strip().lower()
 
-                    eligible = (
-                        info.get("storePickEligible") is True
-                    )
+                    eligible = info.get("storePickEligible") is True
 
                     is_available = (
                         eligible
@@ -301,8 +297,7 @@ def check_pickup():
             "Apple API did not return any stores."
         )
 
-    # Не сохраняем потенциально неполные результаты,
-    # если Apple API завершился ошибкой для какого-либо города.
+    # Не сохраняем неполные результаты проверки.
     if errors:
         raise RuntimeError(
             "Apple API errors: " + "; ".join(errors)
@@ -325,7 +320,7 @@ def availability_message(available_now, product_names):
 
         lines.extend([
             "",
-            "Проверь наличие на Apple UAE:",
+            "Проверь наличие и оформи Pickup на Apple UAE:",
             "https://www.apple.com/ae/shop/buy-iphone/iphone-duo",
         ])
 
@@ -365,6 +360,7 @@ def main():
 
     newly_available = available_now - old_state
 
+    # Уведомляем только о новых доступных вариантах.
     if newly_available:
         lines = [
             "🎉 Apple Duo: появился самовывоз!",
@@ -384,26 +380,22 @@ def main():
 
         telegram("\n".join(lines))
 
+    # Отправляем результат проверки только по команде /start.
     for chat_id in sorted(manual_chats):
         telegram(
             availability_message(available_now, product_names),
             chat_id=chat_id,
         )
 
-    if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
-        telegram(
-            "✅ Проверка Duo Pickup Bot завершена.\n"
-            f"Магазинов в результатах Apple API: {store_count}.\n"
-            f"Доступных вариантов: {len(available_now)}."
-        )
+    # Служебные сообщения отправляются только в логи GitHub Actions.
+    print("Pickup check completed.")
+    print(f"Stores found: {store_count}")
+    print(f"Available variants: {len(available_now)}")
+    print(f"Newly available variants: {len(newly_available)}")
 
     save_state(available_now)
     save_offset(latest_offset)
     persist_files()
-
-    print(f"Stores found: {store_count}")
-    print(f"Available variants: {len(available_now)}")
-    print(f"Newly available variants: {len(newly_available)}")
 
 
 if __name__ == "__main__":
