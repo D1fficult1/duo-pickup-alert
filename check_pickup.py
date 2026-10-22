@@ -32,8 +32,19 @@ LOCATIONS = [
 
 STATE_FILE = "availability_state.json"
 OFFSET_FILE = "telegram_update_offset.txt"
-
 DATE_LIMIT = date(2027, 12, 31)
+
+STORAGE_ORDER = {
+    "256GB": 0,
+    "512GB": 1,
+    "1TB": 2,
+    "2TB": 3,
+}
+
+COLOR_ORDER = {
+    "Star White": 0,
+    "Night Sky": 1,
+}
 
 
 def api_json(url, data=None):
@@ -105,7 +116,7 @@ def save_offset(offset):
 
 
 def persist_files():
-    """Сохраняет состояние в GitHub."""
+    """Сохраняет состояние проверки в GitHub."""
     try:
         subprocess.run(
             ["git", "config", "user.name", "Duo Pickup Bot"],
@@ -221,20 +232,14 @@ def get_manual_requests(offset):
 
 def has_check_back_date(quote):
     """
-    Проверяет сообщение вида:
-    Check back for availability on 23/10
-    Check back for availability on 23/10/2026
-    Check back for availability on October 23, 2026
-
-    Если год не указан, предполагается текущий год.
-    Даты до 31.12.2027 включительно исключаются.
+    Исключает известные сообщения Apple о необходимости
+    проверить наличие позже, если дата не позднее 31.12.2027.
     """
     quote = quote.strip().lower()
 
     if "check back for availability on" not in quote:
         return False
 
-    # Числовые форматы: 23/10, 23/10/2026, 23-10-2027
     match = re.search(
         r"check back for availability on\s+"
         r"(\d{1,2})[/-](\d{1,2})(?:[/-](\d{4}))?",
@@ -253,10 +258,9 @@ def has_check_back_date(quote):
         try:
             return date(year, month, day) <= DATE_LIMIT
         except ValueError:
-            # Некорректную дату не считаем подтверждённым исключением.
-            return False
+            # Неизвестную дату считаем неопределённой.
+            return True
 
-    # Текстовые форматы дат на английском языке.
     date_text = quote.split(
         "check back for availability on", 1
     )[1].strip()
@@ -284,9 +288,9 @@ def has_check_back_date(quote):
         except ValueError:
             continue
 
-    # Неизвестный формат даты не исключаем автоматически:
-    # его нужно изучить по диагностическому логу.
-    return False
+    # Если Apple изменит формат даты, не объявляем наличие
+    # на основании непонятного сообщения.
+    return True
 
 
 def is_pickup_available(info):
@@ -300,11 +304,9 @@ def is_pickup_available(info):
 
     eligible = info.get("storePickEligible") is True
 
-    # Eligibility само по себе не подтверждает наличие.
     if not eligible:
         return False
 
-    # Известные статусы, не подтверждающие наличие.
     if display in ("", "default", "unavailable", "none"):
         return False
 
@@ -315,7 +317,6 @@ def is_pickup_available(info):
         if has_check_back_date(quote):
             return False
 
-    # Остальные известные явные отрицательные ответы.
     if "unavailable" in quote:
         return False
 
@@ -324,7 +325,7 @@ def is_pickup_available(info):
 
 def check_pickup():
     available_now = set()
-    product_names = {}
+    product_details = {}
     stores_found = set()
     errors = []
 
@@ -354,9 +355,11 @@ def check_pickup():
             for store in stores:
                 store_name = store.get("storeName", "Apple Store")
                 city = store.get("city", location)
-                store_number = store.get("storeNumber", store_name)
+                store_number = str(
+                    store.get("storeNumber", store_name)
+                )
 
-                stores_found.add(str(store_number))
+                stores_found.add(store_number)
 
                 availability = store.get("partsAvailability", {})
 
@@ -369,20 +372,19 @@ def check_pickup():
                         info.get("pickupSearchQuote", "")
                     ).strip().lower()
 
-                    eligible = info.get("storePickEligible") is True
+                    eligible = (
+                        info.get("storePickEligible") is True
+                    )
 
                     print(
                         f"APPLE DEBUG | store={store_name} | "
-                        f"city={city} | "
-                        f"part={part} | "
+                        f"city={city} | part={part} | "
                         f"pickupDisplay={info.get('pickupDisplay')!r} | "
                         f"pickupSearchQuote={info.get('pickupSearchQuote')!r} | "
                         f"storePickEligible={info.get('storePickEligible')!r}"
                     )
 
-                    is_available = is_pickup_available(info)
-
-                    if not is_available:
+                    if not is_pickup_available(info):
                         continue
 
                     key = f"{store_number}|{part}"
@@ -397,9 +399,12 @@ def check_pickup():
                         "storePickupProductTitle", part
                     )
 
-                    product_names[key] = (
-                        f"{title} — {store_name}, {city}"
-                    )
+                    product_details[key] = {
+                        "title": title,
+                        "store_number": store_number,
+                        "store_name": store_name,
+                        "city": city,
+                    }
 
         except Exception as error:
             errors.append(f"{location}: {error}")
@@ -409,44 +414,141 @@ def check_pickup():
             "Apple API did not return any stores."
         )
 
-    # Не сохраняем неполные результаты проверки.
+    # Не обновляем состояние при неполной проверке.
     if errors:
         raise RuntimeError(
             "Apple API errors: " + "; ".join(errors)
         )
 
-    return available_now, product_names, len(stores_found)
+    return available_now, product_details, len(stores_found)
 
 
-def availability_message(available_now, product_names):
-    if available_now:
-        lines = [
-            "🔎 Результат проверки Apple Duo:",
-            "",
-        ]
+def product_sort_key(title):
+    """Сортирует по памяти, затем по цвету."""
+    normalized = title.upper().replace(" ", "")
 
-        for key in sorted(available_now):
-            lines.append(
-                "• " + product_names.get(key, key)
-            )
+    storage = next(
+        (
+            value for value in STORAGE_ORDER
+            if value in normalized
+        ),
+        None,
+    )
 
-        lines.extend([
-            "",
-            "Проверь наличие и оформи Pickup на Apple UAE:",
-            "https://www.apple.com/ae/shop/buy-iphone/iphone-duo",
-        ])
+    color = next(
+        (
+            value for value in COLOR_ORDER
+            if value.lower() in title.lower()
+        ),
+        None,
+    )
 
-    else:
-        lines = [
-            "🔎 Проверка Apple Duo завершена.",
-            "Сейчас доступных вариантов самовывоза "
-            "среди проверенных конфигураций не найдено.",
-            "",
-            "Apple UAE:",
-            "https://www.apple.com/ae/shop/buy-iphone/iphone-duo",
-        ]
+    return (
+        STORAGE_ORDER.get(storage, 99),
+        COLOR_ORDER.get(color, 99),
+        title.lower(),
+    )
+
+
+def group_by_store(keys, product_details):
+    """Группирует выбранные варианты по магазинам."""
+    groups = {}
+
+    for key in keys:
+        details = product_details.get(key)
+
+        if not details:
+            continue
+
+        store_number = details["store_number"]
+
+        if store_number not in groups:
+            groups[store_number] = {
+                "store_name": details["store_name"],
+                "city": details["city"],
+                "products": [],
+            }
+
+        groups[store_number]["products"].append(
+            details["title"]
+        )
+
+    return groups
+
+
+def store_sort_key(item):
+    store = item[1]
+    return (
+        store["store_name"].lower(),
+        store["city"].lower(),
+    )
+
+
+def build_store_message(store, heading):
+    lines = [
+        heading,
+        "",
+        f"📍 {store['store_name']} · {store['city']}",
+        "",
+    ]
+
+    products = sorted(
+        set(store["products"]),
+        key=product_sort_key,
+    )
+
+    current_storage = None
+
+    for title in products:
+        normalized = title.upper().replace(" ", "")
+
+        storage = next(
+            (
+                value for value in STORAGE_ORDER
+                if value in normalized
+            ),
+            None,
+        )
+
+        color = next(
+            (
+                value for value in COLOR_ORDER
+                if value.lower() in title.lower()
+            ),
+            None,
+        )
+
+        if storage != current_storage:
+            if current_storage is not None:
+                lines.append("")
+
+            lines.append(f"{storage or 'Other'}")
+            current_storage = storage
+
+        # Показываем только цвет под заголовком памяти.
+        if color:
+            lines.append(f"• {color}")
+        else:
+            lines.append(f"• {title}")
+
+    lines.extend([
+        "",
+        "Проверить наличие и оформить Pickup:",
+        "https://www.apple.com/ae/shop/buy-iphone/iphone-duo",
+    ])
 
     return "\n".join(lines)
+
+
+def send_grouped_messages(keys, product_details, heading):
+    """Отправляет по одному сообщению на каждый магазин."""
+    groups = group_by_store(keys, product_details)
+
+    for _, store in sorted(
+        groups.items(),
+        key=lambda item: store_sort_key(item),
+    ):
+        telegram(build_store_message(store, heading))
 
 
 def main():
@@ -465,39 +567,52 @@ def main():
         )
 
     try:
-        available_now, product_names, store_count = check_pickup()
+        available_now, product_details, store_count = check_pickup()
     except Exception as error:
         print(f"Skipping check due to API error: {error}")
         return
 
     newly_available = available_now - old_state
 
-    # Уведомление только о новых доступных вариантах.
+    # Уведомляем только о новых поступлениях.
+    # Отдельное компактное сообщение для каждого магазина.
     if newly_available:
-        lines = [
-            "🎉 Apple Duo: появился самовывоз!",
-            "",
-        ]
-
-        for key in sorted(newly_available):
-            lines.append(
-                "• " + product_names.get(key, key)
-            )
-
-        lines.extend([
-            "",
-            "Проверь наличие и оформи Pickup на Apple UAE:",
-            "https://www.apple.com/ae/shop/buy-iphone/iphone-duo",
-        ])
-
-        telegram("\n".join(lines))
-
-    # Результат проверки отправляется по команде /start.
-    for chat_id in sorted(manual_chats):
-        telegram(
-            availability_message(available_now, product_names),
-            chat_id=chat_id,
+        send_grouped_messages(
+            newly_available,
+            product_details,
+            "🎉 Apple Duo — появился самовывоз!",
         )
+
+    # /start показывает всё текущее наличие,
+    # сгруппированное по магазинам.
+    for chat_id in sorted(manual_chats):
+        groups = group_by_store(
+            available_now,
+            product_details,
+        )
+
+        if not groups:
+            telegram(
+                "🔎 Проверка Apple Duo завершена.\n\n"
+                "Сейчас доступных вариантов самовывоза "
+                "среди проверенных конфигураций не найдено.\n\n"
+                "Apple UAE:\n"
+                "https://www.apple.com/ae/shop/buy-iphone/iphone-duo",
+                chat_id=chat_id,
+            )
+            continue
+
+        for _, store in sorted(
+            groups.items(),
+            key=lambda item: store_sort_key(item),
+        ):
+            telegram(
+                build_store_message(
+                    store,
+                    "🔎 Результат проверки Apple Duo:",
+                ),
+                chat_id=chat_id,
+            )
 
     print("Pickup check completed.")
     print(f"Stores found: {store_count}")
