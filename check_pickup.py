@@ -1,8 +1,10 @@
 import json
 import os
+import re
 import subprocess
 import urllib.parse
 import urllib.request
+from datetime import date, datetime
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
@@ -30,6 +32,8 @@ LOCATIONS = [
 
 STATE_FILE = "availability_state.json"
 OFFSET_FILE = "telegram_update_offset.txt"
+
+DATE_LIMIT = date(2027, 12, 31)
 
 
 def api_json(url, data=None):
@@ -215,6 +219,109 @@ def get_manual_requests(offset):
         return set(), offset
 
 
+def has_check_back_date(quote):
+    """
+    Проверяет сообщение вида:
+    Check back for availability on 23/10
+    Check back for availability on 23/10/2026
+    Check back for availability on October 23, 2026
+
+    Если год не указан, предполагается текущий год.
+    Даты до 31.12.2027 включительно исключаются.
+    """
+    quote = quote.strip().lower()
+
+    if "check back for availability on" not in quote:
+        return False
+
+    # Числовые форматы: 23/10, 23/10/2026, 23-10-2027
+    match = re.search(
+        r"check back for availability on\s+"
+        r"(\d{1,2})[/-](\d{1,2})(?:[/-](\d{4}))?",
+        quote,
+    )
+
+    if match:
+        day = int(match.group(1))
+        month = int(match.group(2))
+        year = (
+            int(match.group(3))
+            if match.group(3)
+            else datetime.now().year
+        )
+
+        try:
+            return date(year, month, day) <= DATE_LIMIT
+        except ValueError:
+            # Некорректную дату не считаем подтверждённым исключением.
+            return False
+
+    # Текстовые форматы дат на английском языке.
+    date_text = quote.split(
+        "check back for availability on", 1
+    )[1].strip()
+
+    for fmt in (
+        "%B %d, %Y",
+        "%b %d, %Y",
+        "%d %B %Y",
+        "%d %b %Y",
+        "%B %d",
+        "%b %d",
+        "%d %B",
+        "%d %b",
+    ):
+        try:
+            parsed = datetime.strptime(date_text, fmt).date()
+
+            if "%Y" not in fmt:
+                parsed = parsed.replace(
+                    year=datetime.now().year
+                )
+
+            return parsed <= DATE_LIMIT
+
+        except ValueError:
+            continue
+
+    # Неизвестный формат даты не исключаем автоматически:
+    # его нужно изучить по диагностическому логу.
+    return False
+
+
+def is_pickup_available(info):
+    display = str(
+        info.get("pickupDisplay", "")
+    ).strip().lower()
+
+    quote = str(
+        info.get("pickupSearchQuote", "")
+    ).strip().lower()
+
+    eligible = info.get("storePickEligible") is True
+
+    # Eligibility само по себе не подтверждает наличие.
+    if not eligible:
+        return False
+
+    # Известные статусы, не подтверждающие наличие.
+    if display in ("", "default", "unavailable", "none"):
+        return False
+
+    if "currently unavailable" in quote:
+        return False
+
+    if "check back for availability on" in quote:
+        if has_check_back_date(quote):
+            return False
+
+    # Остальные известные явные отрицательные ответы.
+    if "unavailable" in quote:
+        return False
+
+    return True
+
+
 def check_pickup():
     available_now = set()
     product_names = {}
@@ -273,15 +380,7 @@ def check_pickup():
                         f"storePickEligible={info.get('storePickEligible')!r}"
                     )
 
-                    # Исправленная проверка наличия.
-                    # storePickEligible само по себе не подтверждает наличие.
-                    is_available = (
-                        eligible
-                        and display == "available"
-                        and "check back for availability" not in quote
-                        and "currently unavailable" not in quote
-                        and "unavailable" not in quote
-                    )
+                    is_available = is_pickup_available(info)
 
                     if not is_available:
                         continue
@@ -393,7 +492,7 @@ def main():
 
         telegram("\n".join(lines))
 
-    # Результат полной проверки отправляется по команде /start.
+    # Результат проверки отправляется по команде /start.
     for chat_id in sorted(manual_chats):
         telegram(
             availability_message(available_now, product_names),
