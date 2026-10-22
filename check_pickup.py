@@ -264,6 +264,16 @@ def check_pickup():
 
                     eligible = info.get("storePickEligible") is True
 
+                    # Диагностика ответа Apple.
+                    print(
+                        f"APPLE DEBUG | store={store_name} | "
+                        f"city={city} | "
+                        f"part={part} | "
+                        f"pickupDisplay={info.get('pickupDisplay')!r} | "
+                        f"pickupSearchQuote={info.get('pickupSearchQuote')!r} | "
+                        f"storePickEligible={info.get('storePickEligible')!r}"
+                    )
+
                     is_available = (
                         eligible
                         and display not in ("", "unavailable", "none")
@@ -360,7 +370,7 @@ def main():
 
     newly_available = available_now - old_state
 
-    # Уведомляем только о новых доступных вариантах.
+    # Пока оставляем исходную логику уведомлений без изменений.
     if newly_available:
         lines = [
             "🎉 Apple Duo: появился самовывоз!",
@@ -387,7 +397,6 @@ def main():
             chat_id=chat_id,
         )
 
-    # Служебные сообщения отправляются только в логи GitHub Actions.
     print("Pickup check completed.")
     print(f"Stores found: {store_count}")
     print(f"Available variants: {len(available_now)}")
