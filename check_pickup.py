@@ -264,7 +264,6 @@ def check_pickup():
 
                     eligible = info.get("storePickEligible") is True
 
-                    # Диагностика ответа Apple.
                     print(
                         f"APPLE DEBUG | store={store_name} | "
                         f"city={city} | "
@@ -274,10 +273,14 @@ def check_pickup():
                         f"storePickEligible={info.get('storePickEligible')!r}"
                     )
 
+                    # Исправленная проверка наличия.
+                    # storePickEligible само по себе не подтверждает наличие.
                     is_available = (
                         eligible
-                        and display not in ("", "unavailable", "none")
+                        and display == "available"
+                        and "check back for availability" not in quote
                         and "currently unavailable" not in quote
+                        and "unavailable" not in quote
                     )
 
                     if not is_available:
@@ -370,7 +373,7 @@ def main():
 
     newly_available = available_now - old_state
 
-    # Пока оставляем исходную логику уведомлений без изменений.
+    # Уведомление только о новых доступных вариантах.
     if newly_available:
         lines = [
             "🎉 Apple Duo: появился самовывоз!",
@@ -390,7 +393,7 @@ def main():
 
         telegram("\n".join(lines))
 
-    # Отправляем результат проверки только по команде /start.
+    # Результат полной проверки отправляется по команде /start.
     for chat_id in sorted(manual_chats):
         telegram(
             availability_message(available_now, product_names),
